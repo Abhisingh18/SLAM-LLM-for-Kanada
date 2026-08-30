@@ -1,201 +1,68 @@
-# Longform ASR for Indian Languages
+# SLAM-LLM for Kannada-English Bilingual ASR
 
-Automatic Speech Recognition (ASR) for Indian languages (Tamil & Hindi) using the SLAM-LLM framework with Silero VAD-based longform inference and rolling previous context.
+Bilingual Kannada-English Automatic Speech Recognition (ASR) built on the [SLAM-LLM](https://github.com/ddlBoJack/SLAM-LLM) framework, for Prof. Umesh S's speech-encoder comparison study at IIT Madras SPRING Lab.
 
----
+A frozen speech encoder feeds a linear projector into **Gemma-3-4B-IT** (fine-tuned with LoRA), trained on Kannada, English, and Kannada-English code-switched data.
 
 ## Architecture
 
 ```
-Raw Audio
+Raw Audio (16kHz)
     │
     ▼
 ┌─────────────────────────────────────┐
-│   Speech Encoder: data2vec-AQC  ❄️   │  ← FROZEN
-│   Params : 314.32 M                 │
-│   Trainable : 0.00 M               │
+│   Speech Encoder                ❄️   │  ← FROZEN (one of 5, see below)
 └─────────────────────────────────────┘
     │
     ▼
 ┌─────────────────────────────────────┐
-│   Projector: Linear             🔥   │  ← TRAINABLE
-│   Params : 14.68 M                  │
+│   Projector: Linear             🔥   │  ← TRAINABLE (5x downsample rate)
 └─────────────────────────────────────┘
     │
     ▼
 ┌─────────────────────────────────────┐
-│   LLM Decoder: Sarvam-1         🔥   │  ← TRAINABLE (LoRA)
-│   Total Params  : 2.52 B            │
-│   Trainable     : 11.98 M           │
-│   LoRA rank     : 32                │
-│   LoRA alpha    : 128               │
+│   LLM Decoder: Gemma-3-4B-IT    🔥   │  ← TRAINABLE (LoRA)
+│   LoRA rank     : 8                 │
+│   LoRA alpha    : 32                │
 │   LoRA targets  : q/k/v/o/gate/     │
-│                   up/down proj      │
+│                   up/down_proj      │
 └─────────────────────────────────────┘
     │
     ▼
   Text Transcription
 ```
 
-### Parameter Summary
+Only the text decoder of the multimodal `google/gemma-3-4b-it` checkpoint is loaded (the SigLIP vision tower is dropped), so LoRA attaches only to the text-side projections.
 
-| Component | Total Params | Trainable | Status |
+## Encoders compared
+
+| # | Encoder | Type | Notes |
 |---|---|---|---|
-| data2vec-AQC Encoder | 314.32 M | 0 M | Frozen ❄️ |
-| Linear Projector | 14.68 M | 14.68 M | Trainable 🔥 |
-| Sarvam-1 LLM (LoRA) | 2,525 M | 11.98 M | Trainable 🔥 |
-| **Total** | **~2,854 M** | **~26.66 M** | |
+| 1 | data2vec-AQC | Kannada CTC fine-tuned | SPRING-INX checkpoint |
+| 2 | data2vec-AQC | Multilingual SSL pretrained-only | SPRING-INX checkpoint |
+| 3 | Custom Transformer | — | In progress |
+| 4 | [XEUS](https://huggingface.co/espnet/xeus) | ESPnet2 E-Branchformer SSL, 577M | Official `SSLTask.build_model_from_file()` loader; no input pre-normalization (matches the model's own frontend) |
+| 5 | [Wav2Vec2-BERT 2.0](https://huggingface.co/facebook/w2v-bert-2.0) | Meta Conformer SSL, 580M | `encoder_frame_offset` fix for correct audio-token slot alignment |
 
----
+All encoders are frozen; only the projector and LoRA adapters are trained.
+
+## Data
+
+Kannada + English + Kannada-English code-switched training data, proportionately merged (~4:1 Kannada:English by hours), with a `kn-en` code-switch prompt variant that tells the LLM when an utterance mixes both languages.
+
+## Notable fixes made during encoder integration
+
+- **XEUS**: our `espnet` package (202402) predated the checkpoint's schema, requiring a manual config-patching workaround that left ~1.7% of encoder params randomly initialized. Upgrading to `espnet==202506` let the official loader load 100% of params directly. Also fixed `dataset_config.normalize` being incorrectly set to `true` — XEUS's own frontend expects raw, unnormalized waveform.
+- **Wav2Vec2-BERT 2.0**: the dataset's audio-token-slot reservation formula (`samples // 320`) assumed a raw-CNN encoder frame rate; Wav2Vec2-BERT's log-mel + stride-2 feature-stacking pipeline is consistently 1 frame short of that formula, verified empirically across multiple audio durations. Without the fix, every training example had one reserved slot scattered as an all-zero embedding into the LLM's input. Fixed via `dataset_config.encoder_frame_offset`.
 
 ## Training
 
-### Setup
-- **Data**: Tamil (~2000 hours), Hindi (~4000 hours)
-- **Encoder**: `SPRING_INX_data2vec_aqc_Tamil.pt` / `SPRING_INX_data2vec_aqc_Hindi.pt` (frozen)
-- **Projector**: Linear layer (5x downsampling rate)
-- **LLM**: Sarvam-1 with LoRA fine-tuning
-- **Training framework**: DeepSpeed multi-GPU
+- Framework: DeepSpeed ZeRO-2, 4 GPUs
+- Effective batch size: 4 (micro) × 2 (grad accum) × 4 (GPUs) = 32
+- Checkpoint/eval cadence decoupled (`checkpoint_interval`, `max_eval_steps`) so validation can run frequently without paying the full-dev-set cost every time
 
-### LoRA Config
-```
-r           = 32
-lora_alpha  = 128
-dropout     = 0.05
-bias        = none
-target      = q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj
-```
+See `examples/asr_librispeech/scripts/finetune_data2vec_gemma3_kannada_*.sh` for the per-encoder training scripts and `examples/asr_librispeech/scripts/inference_data2vec_gemma3_kannada.sh` for benchmark decoding (FLEURS, IndicTTS, Kathbath, Kathbath-Noisy).
 
-### Prompt (with previous context)
-```
-Using previous context: {prev_context}. Transcribe speech to text. Apply relevant details from the previous context.
-```
+## Acknowledgements
 
-### Training Scripts
-```bash
-# Tamil
-bash examples/asr_librispeech/scripts/finetune_data2vec_sarvam1_longform.sh
-
-# Hindi
-bash examples/asr_librispeech/scripts/finetune_data2vec_sarvam1_longform_hindi.sh
-```
-
----
-
-## Inference (Longform)
-
-### Pipeline
-
-```
-Long Audio File
-      │
-      ▼
- [Step 1] ffmpeg → 16kHz mono WAV
-      │
-      ▼
- [Step 2] Silero VAD chunking
-          threshold     = 0.4
-          max chunk     = 15 seconds
-          min chunk     = 1 second
-      │
-      ▼
- [Step 3] Chunk-by-chunk inference
-          with 1 previous chunk context
-      │
-      ▼
- Transcription (tab-separated: key \t text)
-```
-
-### Run Inference
-
-```bash
-# Tamil
-bash examples/asr_librispeech/scripts/run_longform_tamil_1ctx.sh \
-    /path/to/audio.wav \
-    my_experiment
-
-# Hindi
-bash examples/asr_librispeech/scripts/run_longform_hindi_1ctx.sh \
-    /path/to/audio.wav \
-    my_experiment
-```
-
-Output at: `/speech/abhishek/exps/longform/<experiment_name>/decode_1ctx/decode_pred`
-
----
-
-## Tamil ASR Results (WER %)
-
-### Model Comparison
-
-| Encoder ❄️ | Projector 🔥 | Decoder 🔥 | Steps | CommonVoice | FLEURS | IndictTS | Kathbath | Kathbath Noisy | MUCS | MILE | r1_eval | r2_eval | MIC |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| data2vec-AQC (314M) | linear (15.73M) | gemma-3-4b-pt — LoRA (14.90M trainable) | 75K | 7.56 | 12.33 | 4.95 | 5.71 | 6.35 | 7.45 | 4.15 | 10.77 | 11.22 | 6.38 |
-| data2vec-AQC (314M) | linear (14.68M) | **Sarvam-1 — LoRA (11.98M trainable)** | 100K | **7.37** | **12.14** | 5.90 | 6.05 | 6.74 | **5.37** | **4.14** | **10.09** | **10.40** | **5.96** |
-| data2vec-AQC (314M) | linear (14.68M) | gemma-2b-it-tamil — LoRA (9.80M trainable) | 80K | 7.94 | 11.69 | 5.40 | 5.35 | 6.04 | 6.33 | 4.07 | 11.34 | 12.02 | 5.82 |
-
-### Test Set Details
-
-| Test Set | Sentences |
-|---|---|
-| CommonVoice Tamil | 5,702 |
-| FLEURS Tamil | 591 |
-| IndicTTS Tamil | 100 |
-| Kathbath Tamil | 1,642 |
-| Kathbath Noisy Tamil | 1,642 |
-| MUCS Tamil | 2,609 |
-| MILE Tamil | 12,087 |
-| r1_eval | 3,165 |
-| r2_eval | 2,125 |
-| MIC | 2,609 |
-
-> **Best overall**: Sarvam-1 wins on CommonVoice, FLEURS, MUCS, MILE, r1_eval, r2_eval, MIC
-
----
-
-## Hindi ASR Results (WER %)
-
-### Model Comparison
-
-| Encoder ❄️ | Projector 🔥 | Decoder 🔥 | Steps | CommonVoice | FLEURS | IndicTTS | Kathbath | Kathbath Noisy | MUCS |
-|---|---|---|---|---|---|---|---|---|---|
-| data2vec-AQC (314M) | linear (14.68M) | **Sarvam-1 — LoRA (11.98M trainable)** | epoch1 (~63K) | **6.95** | **7.90** | **5.96** | **5.02** | **5.60** | **7.25** |
-| data2vec-AQC (314M) | linear (14.68M) | Airavata — LoRA | 169K | 7.45 | 7.87 | 6.01 | 5.24 | 6.30 | 7.98 |
-
-### Test Set Details
-
-| Test Set | Sentences |
-|---|---|
-| CommonVoice Hindi | 1,727 |
-| FLEURS Hindi | 418 |
-| IndicTTS Hindi | 100 |
-| Kathbath Hindi | 1,929 |
-| Kathbath Noisy Hindi | 1,929 |
-| MUCS Hindi | 3,897 |
-
-> **Training Data**: Hindi ~4000 Hours  
-> **Best overall**: Sarvam-1 wins on CommonVoice, IndicTTS, Kathbath, Kathbath Noisy, MUCS
-
----
-
-## Checkpoints
-
-| Language | Checkpoint |
-|---|---|
-| Tamil | `sarvam-1-tamil-LoRA-prevctx-20260618_151118/asr_epoch_1_step_80000` |
-| Hindi | `sarvam-1-hindi-LoRA-prevctx-20260604_193035` |
-
----
-
-## Requirements
-
-```bash
-pip install -r requirements.txt
-```
-
-- Python 3.10
-- PyTorch + CUDA
-- Silero VAD (`torch.hub`)
-- HuggingFace Transformers
-- DeepSpeed (for training)
-- ffmpeg
+Built on [SLAM-LLM](https://github.com/ddlBoJack/SLAM-LLM). Encoder checkpoints from [SPRING Lab](https://asr.iitm.ac.in/), [ESPnet](https://github.com/espnet/espnet), and [Meta AI](https://huggingface.co/facebook/w2v-bert-2.0).
