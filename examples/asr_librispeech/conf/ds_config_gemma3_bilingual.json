@@ -1,0 +1,25 @@
+{
+    "train_micro_batch_size_per_gpu": 4,
+    "gradient_accumulation_steps": 2,
+    "gradient_clipping": 1.0,
+    "optimizer": {
+        "type": "AdamW",
+        "params": {
+            "lr": 1e-4
+        }
+    },
+    "scheduler": {
+        "type": "WarmupLR",
+        "params": {
+            "warmup_min_lr": 0,
+            "warmup_max_lr": 1e-4,
+            "warmup_num_steps": 1000
+        }
+    },
+    "bf16": {
+        "enabled": true
+    },
+    "zero_optimization": {
+        "stage": 2
+    }
+}
