@@ -107,6 +107,9 @@ def setup_encoder(train_config, model_config, **kwargs):
         if encoder_name == "data2vec_aqc":
             from slam_llm.models.encoder import Data2VecAQCEncoder
             encoder = Data2VecAQCEncoder.load(model_config)
+        if encoder_name == "espnet_transformer":
+            from slam_llm.models.espnet_transformer_encoder import EspnetTransformerEncoder
+            encoder = EspnetTransformerEncoder.load(model_config)
         if encoder_name == "xeus":
             from slam_llm.models.xeus_encoder import XeusEncoder
             encoder = XeusEncoder.load(model_config)
@@ -498,6 +501,11 @@ class slam_model(nn.Module):
                     n_bad = (~torch.isfinite(audio)).sum().item()
                     logger.warning(f"[data2vec_aqc] non-finite audio input: {n_bad} elt(s); replacing with 0")
                     audio = torch.nan_to_num(audio, nan=0.0, posinf=0.0, neginf=0.0)
+                encoder_outs = self.encoder.extract_features(audio, padding_mask)
+            if self.model_config.encoder_name == "espnet_transformer":
+                # Same fairseq convention as data2vec_aqc: padding_mask is
+                # 1=pad (inverse of audio_mask).
+                padding_mask = (1 - audio_mask) if audio_mask is not None else None
                 encoder_outs = self.encoder.extract_features(audio, padding_mask)
             if self.encoder is None:
                 encoder_outs = audio_mel if audio_mel is not None else audio
