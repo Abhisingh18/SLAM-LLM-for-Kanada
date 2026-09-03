@@ -366,6 +366,26 @@ class slam_model(nn.Module):
                     self.eps,
                 )
                 return output.type_as(input)
+            # BUGFIX (found integrating the Whisper encoder): openai-whisper's
+            # own LayerNorm subclass (whisper/model.py) overrides forward as a
+            # thin float32-safe wrapper: `super().forward(x.float()).type(x.dtype)`.
+            # That casts the INPUT to float32 but not its own self.weight/bias --
+            # under DeepSpeed's bf16 casting (which casts every parameter,
+            # including this frozen encoder's), weight/bias end up bf16 while
+            # the wrapper hands F.layer_norm a float32 input -> "expected Float
+            # but found BFloat16". The `type(item).forward is nn.LayerNorm.forward`
+            # check below (correctly) skips subclasses that override forward for
+            # a structural reason (e.g. XEUS's TransposedLayerNorm, which
+            # transposes axes) since clobbering those breaks the transpose --
+            # but it also skips whisper's LayerNorm, which the comment history
+            # here assumed WAS getting patched. Detect that specific whisper
+            # class by its module path (whisper not installed => silently
+            # skipped) and patch it too; its override does no structural work,
+            # only precision casting, so replacing it with new_forward is safe.
+            try:
+                from whisper.model import LayerNorm as _WhisperLayerNorm
+            except ImportError:
+                _WhisperLayerNorm = None
             for item in self.modules():
                 # Only patch STOCK nn.LayerNorm.forward (matches Tomson's Hindi
                 # XEUS setup exactly). Some encoders subclass nn.LayerNorm and
@@ -375,8 +395,12 @@ class slam_model(nn.Module):
                 # LayerNorms (LLM, whisper/hubert, XEUS final_norm) patch as
                 # before, INCLUDING any subclass that doesn't override forward
                 # (broader than the old `type(item) is nn.LayerNorm` exact-type
-                # check, which excluded those too).
-                if isinstance(item, nn.LayerNorm) and type(item).forward is nn.LayerNorm.forward:
+                # check, which excluded those too), PLUS whisper's own
+                # LayerNorm subclass (see BUGFIX note above).
+                if isinstance(item, nn.LayerNorm) and (
+                    type(item).forward is nn.LayerNorm.forward
+                    or (_WhisperLayerNorm is not None and isinstance(item, _WhisperLayerNorm))
+                ):
                     item.forward = types.MethodType(new_forward, item)
 
 

@@ -1,8 +1,9 @@
 #!/bin/bash
-# Compute WER for the Kannada 4-testset decode across all 3 completed
-# encoders (data2vec-AQC Kannada-finetuned, data2vec-AQC SSL, XEUS).
-# Copied from compute_wer_bilingual_9testsets.sh; uses akshaya_wer.py
-# (Unicode-safe, script-agnostic normalization -- works for Kannada too).
+# Compute WER for the Kannada 4-testset decode across all 4 completed
+# encoders (data2vec-AQC Kannada-finetuned, data2vec-AQC SSL, XEUS, ESPnet
+# Transformer). Copied from compute_wer_bilingual_9testsets.sh; uses
+# akshaya_wer.py (Unicode-safe, script-agnostic normalization -- works for
+# Kannada too).
 
 py=/speech/abhishek/miniconda3/envs/slam_llm/bin/python3
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -20,6 +21,8 @@ declare -A decode_dirs=(
     ["data2vec-FT"]="/speech/abhishek/output/kannada-cs-data2vec-gemma3-4b-finetuned/decode_results_asr_epoch_1_step_33000_4testsets"
     ["data2vec-SSL"]="/speech/abhishek/output/kannada-cs-data2vec-ssl-gemma3-4b-finetuned/decode_results_asr_epoch_1_step_33000_4testsets"
     ["XEUS"]="/speech/abhishek/output/kannada-cs-xeus-v2-tomson-matched-gemma3-4b-finetuned/decode_results_asr_epoch_1_step_33000_4testsets"
+    ["Transformer"]="/speech/abhishek/output/kannada-cs-transformer-gemma3-4b-finetuned/decode_results_asr_epoch_1_step_33000_4testsets"
+    ["Whisper"]="/speech/abhishek/output/kannada-cs-whisper-gemma3-4b-finetuned/decode_results_asr_epoch_1_step_33000_4testsets"
 )
 
 for encoder in "${!decode_dirs[@]}"; do
